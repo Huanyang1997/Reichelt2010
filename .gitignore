@@ -16,3 +16,12 @@ venv/
 logs/*.log
 outputs/
 tmp/
+
+# Large research data artifacts (local only)
+data/raw/
+data/processed/
+Audit_Data_Dictionary_20260204/
+
+# Keep folder structure if needed
+!data/raw/.gitkeep
+!data/processed/.gitkeep
