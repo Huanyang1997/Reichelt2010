@@ -21,6 +21,10 @@ tmp/
 data/raw/
 data/processed/
 Audit_Data_Dictionary_20260204/
+compustat_info/
+
+# Local one-off diagnostics
+check_*_stats.py
 
 # Keep folder structure if needed
 !data/raw/.gitkeep
