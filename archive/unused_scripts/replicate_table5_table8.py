@@ -986,15 +986,37 @@ def main() -> None:
     aa["sic2"] = aa["sic2"].astype("Int64")
     aa = aa.merge(coef_df, left_on=["fiscal_year", "sic2"], right_on=["fyear", "sic2"], how="left")
 
-    # DACC from Eq(2)-(3)
+    # Paper logic (p.110):
+    # 1. Eq(1): estimate coefficients with truncated variables (done above)
+    # 2. Winsorize Eq(2) independent variables
+    # 3. Eq(2): compute ETA using winsorized variables
+    # 4. Winsorize TA and ETA
+    # 5. Eq(3): DACC = winsorized_TA - winsorized_ETA
+    
+    # Winsorize Eq(2) independent variables
+    eq2_vars = ["inv_lag_at", "delta_rev", "delta_rec", "ppe_scaled", "roa_lag"]
+    aa = winsorize_columns(aa, eq2_vars)
+    
+    # Eq(2): ETA from winsorized variables
     aa["eta"] = (
         aa["b0"] * aa["inv_lag_at"]
         + aa["b1"] * (aa["delta_rev"] - aa["delta_rec"])
         + aa["b2"] * aa["ppe_scaled"]
         + aa["b3"] * aa["roa_lag"]
     )
+    
+    # Winsorize TA and ETA (paper p.110)
+    aa = winsorize_columns(aa, ["ta", "eta"])
+    
+    # Eq(3): DACC = winsorized_TA - winsorized_ETA
     aa["dacc"] = aa["ta"] - aa["eta"]
+    
+    # Winsorize DACC (paper p.110)
+    aa = winsorize_columns(aa, ["dacc"])
+    
+    # Take absolute value and winsorize again
     aa["abs_dacc"] = aa["dacc"].abs()
+    aa = winsorize_columns(aa, ["abs_dacc"])
 
     # Auditor controls
     aa["auditor_name_u"] = aa["auditor_name"].astype(str).str.upper()
@@ -1002,10 +1024,9 @@ def main() -> None:
     aa["sec_tier"] = aa["auditor_name_u"].str.contains("GRANT THORNTON|BDO", regex=True).astype(float)
     aa["gc"] = pd.to_numeric(aa["going_concern"], errors="coerce")
 
-    # Eq(2)-(6) winsorization will be applied within equation-specific analysis samples.
+    # Eq(4)-(6): control variables to winsorize within analysis samples
+    # (TA, ETA, DACC, abs_dacc already winsorized above)
     eq26_cont_cols = [
-        "abs_dacc",
-        "dacc",
         "size",
         "sigma_cfo",
         "cfo",

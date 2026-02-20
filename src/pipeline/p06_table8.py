@@ -12,13 +12,13 @@ p06_table8.py — 第六步：Table 8 样本准备与 Logit 回归
 样本构建 (Table 1 Panel D):
   21,583  Working sample
   -6,136  Missing controls
-  -10,472 Non-distressed (OCF ≥ 0)
+  -10,472 Non-distressed (OANCF - XIDOC ≥ 0)
   -6      |Deviance residual| > 3
   = 4,969  Table 8 final sample
 
 关键操作顺序:
   1) 删除缺失值
-  2) 仅保留 financially distressed (OCF < 0) — 论文 p.112
+  2) 仅保留 financially distressed (OANCF - XIDOC < 0) — 论文 p.112
   3) 预回归 logit (def1 model3) 计算 deviance residuals
   4) 删除 |deviance residual| > 3
   5) 正式回归 6 个模型
@@ -143,9 +143,9 @@ def run(cfg: PipelineConfig) -> Path:
     counts["delete_missing"] = int(len(df) - len(t8))
     # 连续变量已在 p04 统一 winsorize，这里不重复处理。
 
-    # ── 6.4 保留 financially distressed (OCF < 0) ──────────────
+    # ── 6.4 保留 financially distressed (OANCF - XIDOC < 0) ────
     #  论文 p.112: "we consider as financially distressed only those
-    #  firms with negative operating cash flows"
+    #  firms with negative operating cash flows (OANCF - XIDOC)"
     counts["delete_non_distressed"] = int((t8["op_cf"] >= 0).sum())
     t8 = t8[t8["op_cf"] < 0].copy()
 

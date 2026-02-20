@@ -146,8 +146,10 @@ def run(cfg: PipelineConfig) -> Path:
     if "ceq" not in comp.columns:
         raise RuntimeError("Compustat 缺少 CEQ，无法构造 MB/ALTMAN")
 
-    comp["mve"] = comp["csho"].abs() * comp["prcc_f"].abs()
-    comp["size"] = np.log(comp["mve"].replace(0, np.nan))
+    comp["mve"] = comp["csho"] * comp["prcc_f"]
+    # SIZE 仅在 MVE>0 时有定义；MVE<=0 的观测记为缺失并在后续样本筛选中删除。
+    comp.loc[comp["mve"] <= 0, "mve"] = np.nan
+    comp["size"] = np.log(comp["mve"])
 
     # ── 3.7 LEV, LOSS, MB ──────────────────────────────────────
     comp["lev"] = comp["dltt"] / comp["at"]
@@ -168,7 +170,7 @@ def run(cfg: PipelineConfig) -> Path:
     # ── 3.9 ALTMAN Z (1968, public firms) ───────────────────────
     #  Z = 1.2 X1 + 1.4 X2 + 3.3 X3 + 0.6 X4 + 1.0 X5
     #  X1 = (ACT-LCT)/AT, X2 = RE/AT, X3 = EBIT/AT,
-    #  X4 = MVE/TL where MVE = |CSHO|*|PRCC_F|, X5 = SALE/AT
+    #  X4 = MVE/TL where MVE = CSHO*PRCC_F, X5 = SALE/AT
     altman_inputs = ["act", "lct", "re", "ebit", "csho", "prcc_f", "lt", "sale", "at"]
     missing_altman = [c for c in altman_inputs if c not in comp.columns]
     if missing_altman:
@@ -180,7 +182,7 @@ def run(cfg: PipelineConfig) -> Path:
         comp["alt_x1"] = (comp["act"] - comp["lct"]) / comp["at"]
         comp["alt_x2"] = comp["re"] / comp["at"]
         comp["alt_x3"] = comp["ebit"] / comp["at"]
-        alt_mve = comp["csho"].abs() * comp["prcc_f"].abs()
+        alt_mve = comp["csho"] * comp["prcc_f"]
         comp["alt_x4"] = alt_mve / comp["lt"]
         comp["alt_x5"] = comp["sale"] / comp["at"]
 

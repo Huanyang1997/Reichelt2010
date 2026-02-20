@@ -47,7 +47,7 @@ import statsmodels.api as sm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline.config import PipelineConfig, ensure_dirs
-from pipeline.utils import norm_cik, truncate_1pct_rows, winsorize_columns
+from pipeline.utils import norm_cik, winsorize_columns, winsorize_series
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -301,8 +301,25 @@ def run(cfg: PipelineConfig) -> Path:
     eq1 = eq1.dropna(subset=eq1_vars + ["sic2", "fyear"])
 
     # 截断 Eq(1) 变量 top/bottom 1% (论文 p.110)
+    # 按 industry-year (fyear × sic2) 分组执行，避免跨组分布差异影响。
     counts["eq1_before_truncate"] = len(eq1)
-    eq1 = truncate_1pct_rows(eq1, eq1_vars)
+
+    def _truncate_group(g: pd.DataFrame) -> pd.DataFrame:
+        keep = pd.Series(True, index=g.index)
+        for c in eq1_vars:
+            s = pd.to_numeric(g[c], errors="coerce")
+            if s.dropna().empty:
+                continue
+            lo = s.quantile(cfg.truncate_pct)
+            hi = s.quantile(1.0 - cfg.truncate_pct)
+            keep = keep & s.between(lo, hi, inclusive="both")
+        return g.loc[keep].copy()
+
+    eq1 = (
+        eq1.groupby(["fyear", "sic2"], group_keys=False)
+        .apply(_truncate_group)
+        .reset_index(drop=True)
+    )
     counts["eq1_after_truncate"] = len(eq1)
 
     coefs = []
@@ -330,8 +347,11 @@ def run(cfg: PipelineConfig) -> Path:
     coef_df.to_csv(coef_path, index=False)
 
     # ── 4.8 计算 ETA (Eq 2) 和 DACC (Eq 3) ─────────────────────
-    # 先用未 winsorized 的变量按 Eq(2)/(3) 计算 ETA 与 DACC。
-    # Eq(1) 的稳健性来自截面估计时的 1% 截断（见上一步）。
+    # 为贴近原文 Eq(2)/(3) 的稳健口径，这里采用“逐步 winsorize”:
+    #  1) Eq(2) 输入变量先做 1%/99% winsorize；
+    #  2) 计算 ETA 后再做 1%/99% winsorize；
+    #  3) Eq(3): DACC = TA - ETA，再对 DACC 做 1%/99% winsorize。
+    # 说明：Eq(1) 的稳健性仍由上一步 industry-year 截面 1% 截断提供。
     aa_panel["sic2_int"] = aa_panel["sic2"].astype("Int64")
     aa_panel = aa_panel.merge(
         coef_df,
@@ -344,34 +364,58 @@ def run(cfg: PipelineConfig) -> Path:
     aa_panel.drop(columns=["fyear", "sic2_eq1"],
                   inplace=True, errors="ignore")
 
-    # Eq(2): 用原始自变量代入 Eq(1) 系数 → ETA
-    aa_panel["eta"] = (
-        aa_panel["b0"] * aa_panel["inv_lag_at"]
-        + aa_panel["b1"] * (aa_panel["delta_rev"] - aa_panel["delta_rec"])
-        + aa_panel["b2"] * aa_panel["ppe_scaled"]
-        + aa_panel["b3"] * aa_panel["roa_lag"]
+    eq23_input_cols = ["ta", "inv_lag_at", "delta_rev",
+                       "delta_rec", "ppe_scaled", "roa_lag"]
+    for c in eq23_input_cols:
+        aa_panel[f"{c}_w"] = (
+            winsorize_series(
+                pd.to_numeric(aa_panel[c], errors="coerce"),
+                lo=cfg.winsor_lo,
+                hi=cfg.winsor_hi,
+            )
+        )
+    # Eq(2): 用 winsorized 输入代入 Eq(1) 系数 → ETA
+    eta_raw = (
+        aa_panel["b0"] * aa_panel["inv_lag_at_w"]
+        + aa_panel["b1"] * (aa_panel["delta_rev_w"] - aa_panel["delta_rec_w"])
+        + aa_panel["b2"] * aa_panel["ppe_scaled_w"]
+        + aa_panel["b3"] * aa_panel["roa_lag_w"]
+    )
+    aa_panel["eta"] = winsorize_series(
+        pd.to_numeric(eta_raw, errors="coerce"),
+        lo=cfg.winsor_lo,
+        hi=cfg.winsor_hi,
     )
 
-    # Eq(3): DACC = TA - ETA（此时仍是原始值）
-    aa_panel["dacc"] = aa_panel["ta"] - aa_panel["eta"]
+    # Eq(3): DACC = TA - ETA，并对 DACC 做 winsorize
+    dacc_raw = aa_panel["ta_w"] - aa_panel["eta"]
+    aa_panel["dacc"] = winsorize_series(
+        pd.to_numeric(dacc_raw, errors="coerce"),
+        lo=cfg.winsor_lo,
+        hi=cfg.winsor_hi,
+    )
     aa_panel["abs_dacc"] = aa_panel["dacc"].abs()
+
+    # 记录关键分位，便于与论文分布对照
+    counts["eq23_eta_p01"] = float(pd.to_numeric(aa_panel["eta"], errors="coerce").quantile(0.01))
+    counts["eq23_eta_p99"] = float(pd.to_numeric(aa_panel["eta"], errors="coerce").quantile(0.99))
+    counts["eq23_dacc_p01"] = float(pd.to_numeric(aa_panel["dacc"], errors="coerce").quantile(0.01))
+    counts["eq23_dacc_p99"] = float(pd.to_numeric(aa_panel["dacc"], errors="coerce").quantile(0.99))
 
     # ── 4.9 审计师控制变量 ──────────────────────────────────────
     # 按用户指定口径：
     #   BIG4 = 1 if auditor_fkey in {1,2,3,4}
-    #   SEC_TIER = 1 if auditor_fkey in {5,6}
+    #   SEC_TIER = 1 if auditor_fkey in {6,7}
     aud_key = pd.to_numeric(aa_panel["auditor_fkey"], errors="coerce")
     aa_panel["big4"] = aud_key.isin([1, 2, 3, 4]).astype(float)
-    aa_panel["sec_tier"] = aud_key.isin([5, 6]).astype(float)
+    aa_panel["sec_tier"] = aud_key.isin([6, 7]).astype(float)
     aa_panel["gc"] = pd.to_numeric(
         aa_panel["going_concern"], errors="coerce"
     )
 
     # ── 4.10 统一一次 winsorize（Eq 4 / Eq 6 连续变量）──────────
-    # 按“准备好回归 panel 后统一 winsorize 一次”的流程，
-    # 避免在后续步骤重复 winsorize。
+    # dacc/abs_dacc 已在上一步完成最终 winsorize，这里不重复处理。
     eq46_cont_vars = [
-        "dacc", "abs_dacc",
         "size", "sigma_cfo", "cfo", "lev", "mb", "altman",
         "tenure_ln", "ta_lag_abs",
         "sigma_earn", "roa", "accr",
